@@ -8,6 +8,23 @@ import rare_cleaner
 train_df = pd.DataFrame()
 test_df = pd.DataFrame
 '''
+jupyter 打印df
+'''
+from IPython.display import display, HTML
+display(HTML(pd.DataFrame(train_df).to_html()))
+
+'''
+read_csv 经常会出现第一列是'unnamed 0',使用index_col去除
+'''
+df1 = pd.read_csv('',index_col=0)
+
+'''
+reset_index的时候要注意drop=True，不然可能造成多出一列index
+'''
+df2 = pd.concat([train_df,test_df],sort=False).reset_index(drop=True)
+
+
+'''
 show train_df
 '''
 # 显示各列名字及dtype
@@ -42,34 +59,6 @@ for c in cols:
     topN_num_test = int(test_df[c].apply(lambda x: x in topN_indexs).sum())
     print(topN_num_train/train_num,topN_num_test/test_num)
 
-# 该列trainset和testset中前n多的值的交集
-c = ''
-n = 20
-train_top_index = set(train_df[c].value_counts().index[:n])
-test_top_index = set(test_df[c].value_counts().index[:n])
-print(len(train_top_index & test_top_index))
-print(train_top_index & test_top_index)
-
-
-# 该列中需要比较关心的值,
-c = ''
-bad_top5 = train_df[train_df['Tag']==1][c].value_counts(dropna=False).index[:5]
-bad_top10 = train_df[train_df['Tag']==1][c].value_counts(dropna=False).index[:10]
-good_top5 = train_df[train_df['Tag']==0][c].value_counts(dropna=False).index[:5]
-good_top10 = train_df[train_df['Tag']==0][c].value_counts(dropna=False).index[:10]
-
-differ1 = set(bad_top10).difference(set(good_top10))
-differ2 = set(good_top10).difference(set(bad_top10))
-
-print(bad_top5)
-print(good_top5)
-print(differ1)
-print(differ2)
-print('-----------')
-total = list(bad_top5)+list(good_top5)+list(differ1)+list(differ2)
-for c in set(total):
-    print("'{}',".format(c))
-
 '''
 透视表
 '''
@@ -102,3 +91,71 @@ data_final = reduce(lambda left, right: pd.merge(left, right, on='UID'),merge_li
 rename_dict = {'a':'new_a','b':'new_b'}
 train_df.rename(columns=rename_dict)
 test_df.rename(columns=rename_dict)
+
+'''
+apply返回多个值，合并成一个df
+groupby 之后的apply是对每个group进行操作
+一般df的apply是对column里的每个值进行操作
+两者都可以使用apply返回多个值并合并成一个df
+'''
+pred_df = pd.DataFrame({'UID':[1,1,2,2,2],'Value':[1,2,3,4,5]})
+group = pred_df.groupby('UID')
+def prob_extract(g):
+    v = g['Value'].values
+    v_max = np.max(v)
+    v_min = np.min(v)
+    v_avg = np.mean(v)
+    v_std = np.std(v)
+    res = pd.Series({'v_max':v_max,
+                     'v_min':v_min,
+                     'v_avg':v_avg,
+                     'v_std':v_std,
+                 })
+    return res
+prob_info_test = group.apply(prob_extract).reset_index()
+
+
+'''
+如果某一列的unique过多,只能leableecnode,但是又想找一些关键值做onehot
+1.先clean rare,看下值是否依然过多
+2.通过一些简单指标筛选出一些关键值
+3.将这些关键值onehot之后丢入xgboost训练一会,输出.get_score,查看重要性，进一步筛选
+'''
+# 第二步,初步筛选一些关键值
+N1 = 5
+N2 = 20
+c = ''
+
+bad_topN1 = train_df[train_df['Tag']==1][c].value_counts(dropna=False).index[:N1]
+bad_topN2 = train_df[train_df['Tag']==1][c].value_counts(dropna=False).index[:N2]
+good_topN1 = train_df[train_df['Tag']==0][c].value_counts(dropna=False).index[:N1]
+good_topN2 = train_df[train_df['Tag']==0][c].value_counts(dropna=False).index[:N2]
+
+differ1 = set(bad_topN2).difference(set(good_topN2))
+differ2 = set(good_topN2).difference(set(bad_topN2))
+
+rare_limit = 10
+length = 10
+data_df = train_df[[c,'Tag']].dropna()
+num = data_df.shape[0]
+value_num = len(data_df[c].unique())
+mean_ = data_df['Tag'].mean()
+c_info = pd.pivot_table(data_df, index=c, columns='Tag', aggfunc=len, fill_value=0).reset_index()  # 列c关于Tag的透视表
+c_info['sum'] = c_info[0]+c_info[1]
+# 去除稀少值，因为稀少值会造成倍数特别大
+c_info = c_info[(c_info[1]>rare_limit) & (c_info[0]>rare_limit)]
+c_info = c_info[c_info['sum']>3*(num/value_num)]
+# 平衡正负样本比例
+ratio = (1-mean_)/mean_
+c_info[1] = c_info[1]*ratio
+# 筛选value
+# 用长度去限定阈值，当然也可以直接制定阈值
+for i in range(5,100):
+    negitive_care = c_info[c_info[0]/c_info[1]>i][c].values
+    positive_care = c_info[c_info[1]/c_info[0]>i][c].values
+    if len(list(negitive_care)+list(positive_care))<length:
+        print(i)
+        break
+# negitive_care 和 positive_care 可能比较重要
+important_value = set(good_topN1 + bad_topN1 + differ1 + differ2 + negitive_care + positive_care)
+
